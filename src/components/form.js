@@ -1,7 +1,7 @@
 "use client"
 
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useState, useActionState, useTransition } from 'react';
+import { useState, useTransition } from 'react';
 import { useForm } from "react-hook-form"
 
 import { z } from "zod"
@@ -9,8 +9,6 @@ import { z } from "zod"
 import { Button } from "@/components/ui/button"
 import {
     Form,
-    FormControl,
-    FormDescription,
     FormField,
     FormItem,
     FormLabel,
@@ -21,8 +19,7 @@ import { Input } from "@/components/ui/input"
 import { LoadingSpinner } from "@/components/ui/loading"
 import { getChannelData, getChannelIdFromUsername } from '../app/actions';
 import { CreateDialog } from "@/app/createScriptDialog"
-import { Dialog, DialogTrigger } from "@radix-ui/react-dialog";
-import { DialogContent } from "./ui/dialog";
+import { Dialog, DialogContent, DialogTrigger } from "./ui/dialog";
 import { Cta } from "./sections/Cta";
 import Link from "next/link";
 
@@ -46,11 +43,18 @@ export function MainForm({ logged = true }) {
 
     // 2. Define a submit handler.
     function onSubmit(values) {
-        console.log(values)
         startTransition(async () => {
             let id = await getChannelId(values.channel_id)
+            if (!id || id.error) {
+                form.setError("root.serverError", {
+                    type: id?.error?.code || "INVALID_CHANNEL_INPUT",
+                    message: id?.error?.message || "Enter a valid YouTube channel URL, handle, or ID.",
+                })
+                return
+            }
+
             let res = await getChannelData(id)
-            if (!res.error && id && !id.error)
+            if (!res.error)
                 setChannelData(res)
             else
                 form.setError("root.serverError", {
@@ -89,7 +93,6 @@ export function MainForm({ logged = true }) {
 }
 
 async function getChannelId(url) {
-    console.log("url", url)
     url = url.split("?")[0]
     // Verifica se corrisponde ai casi con @{username}
     const usernameRegex = /youtube\.com\/@([a-zA-Z0-9_]+)/;

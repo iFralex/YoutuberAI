@@ -14,7 +14,7 @@ import { Navbar } from "@/components/sections/Navbar";
 
 export default function Home({ email }) {
     return (
-        <>{console.log("email", email)}
+        <>
             <Navbar navigation={navigation} logged={email !== undefined} />
             <Container>
                 <Hero logged={email !== undefined} />

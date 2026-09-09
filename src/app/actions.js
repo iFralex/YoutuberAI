@@ -1,54 +1,126 @@
 "use server"
 
-export async function reteriveTranscript(videoIds) {
+import { getTokens } from "next-firebase-auth-edge";
+import { cookies } from "next/headers";
+import { z } from "zod";
+
+import { clientConfig, serverConfig } from "../../auth-config";
+import { generateStructuredScript } from "@/lib/vertex-ai";
+
+const MAX_SOURCE_BYTES = 1024 * 1024;
+const MAX_REFERENCE_CHARACTERS = 650_000;
+
+const generationSchema = z.object({
+    channelId: z.string().min(10).max(100),
+    theme: z.string().min(2).max(50),
+    description: z.string().min(20).max(600),
+    minutesNumber: z.coerce.number().int().min(2).max(20),
+    videosCount: z.coerce.number().int().min(5).max(50),
+    sources: z.array(z.string().min(1)).min(1).max(4),
+});
+
+const scriptSchema = z.object({
+    title: z.string().min(1),
+    text: z.string().min(1),
+    description: z.string().min(1),
+    keywords: z.array(z.string().min(1)).min(1),
+});
+
+async function requireAuthenticatedUser() {
+    const tokens = await getTokens(cookies(), {
+        apiKey: clientConfig.apiKey,
+        cookieName: serverConfig.cookieName,
+        cookieSignatureKeys: serverConfig.cookieSignatureKeys,
+        serviceAccount: serverConfig.serviceAccount,
+    });
+
+    if (!tokens?.decodedToken?.user_id) {
+        const error = new Error("Authentication required.");
+        error.code = "UNAUTHENTICATED";
+        throw error;
+    }
+
+    return tokens.decodedToken.user_id;
+}
+
+function actionError(error, fallbackCode, fallbackMessage) {
+    if (error?.code === "UNAUTHENTICATED") {
+        return { ok: false, error: { code: error.code, message: error.message } };
+    }
+
+    if (error instanceof z.ZodError) {
+        return {
+            ok: false,
+            error: {
+                code: "INVALID_INPUT",
+                message: error.issues[0]?.message || "Invalid generation input.",
+            },
+        };
+    }
+
+    console.error(fallbackCode, {
+        name: error?.name,
+        message: error?.message,
+    });
+    return { ok: false, error: { code: fallbackCode, message: fallbackMessage } };
+}
+
+function limitReferenceContext(value) {
+    if (value.length <= MAX_REFERENCE_CHARACTERS) return value;
+    return value.slice(0, MAX_REFERENCE_CHARACTERS) +
+        "\n\n[Reference context truncated to fit the model input limit.]";
+}
+
+async function retrieveTranscripts(videoIds) {
     let parsedTranscripts = []
     const YT_INITIAL_PLAYER_RESPONSE_RE = /ytInitialPlayerResponse\s*=\s*({.+?})\s*;\s*(?:var\s+(?:meta|head)|<\/script|\n)/;
     for (let videoId of videoIds) {
+        try {
+            let response = await fetch("https://www.youtube.com/watch?v=" + videoId)
+            if (!response.ok) continue
 
-        let response = await fetch('https://www.youtube.com/watch?v=' + videoId)
-        let body = await response.text();
-        const playerResponse = body.match(YT_INITIAL_PLAYER_RESPONSE_RE);
-        if (!playerResponse) {
-            console.warn('Unable to parse playerResponse');
-            return;
+            const body = await response.text()
+            const playerResponse = body.match(YT_INITIAL_PLAYER_RESPONSE_RE)
+            if (!playerResponse) continue
+
+            const player = JSON.parse(playerResponse[1])
+            if (Number.parseInt(player.videoDetails?.lengthSeconds || "0", 10) < 150) {
+                continue
+            }
+
+            const tracks = [
+                ...(player.captions?.playerCaptionsTracklistRenderer?.captionTracks || []),
+            ].sort(compareTracks)
+            if (!tracks.length) continue
+
+            response = await fetch(tracks[0].baseUrl + "&fmt=json3")
+            if (!response.ok) continue
+
+            const transcript = await response.json()
+            const parsedTranscript = (transcript.events || [])
+                .filter((event) => event.segs)
+                .map((event) => event.segs
+                    .map((segment) => segment.utf8)
+                    .join(" ")
+                    .replace(/[\u200B-\u200D\uFEFF]/g, ""))
+                .filter(Boolean)
+
+            if (!parsedTranscript.length) continue
+
+            parsedTranscripts.push({
+                transcript: parsedTranscript,
+                data: {
+                    title: player.videoDetails?.title || "Untitled video",
+                    description: player.videoDetails?.shortDescription || "",
+                    keywords: player.videoDetails?.keywords || [],
+                },
+            })
+        } catch (error) {
+            console.warn("Unable to retrieve captions", {
+                videoId,
+                message: error?.message,
+            })
         }
-        let player = JSON.parse(playerResponse[1]);
-
-        if (parseInt(player.videoDetails.lengthSeconds) < 150)
-            continue
-        const metadata = {
-            title: player.videoDetails.title,
-            description: player.videoDetails.shortDescription,
-            keywords: player.videoDetails.keywords,
-        };
-
-        // Get the tracks and sort them by priority
-        const tracks = player.captions.playerCaptionsTracklistRenderer.captionTracks;
-        tracks.sort(compareTracks);
-
-        // Get the transcript
-        response = await fetch(tracks[0].baseUrl + '&fmt=json3')
-        let transcript = await response.json();
-
-        const parsedTranscript = transcript.events
-            // Remove invalid segments
-            .filter(function (x) {
-                return x.segs;
-            })
-
-            // Concatenate into single long string
-            .map(function (x) {
-                return x.segs
-                    .map(function (y) {
-                        return y.utf8;
-                    })
-                    .join(' ')
-                    .replace(/[\u200B-\u200D\uFEFF]/g, '');
-            })
-
-        // Use 'result' here as needed
-
-        parsedTranscripts.push({ transcript: parsedTranscript, data: metadata })
     }
     return parsedTranscripts
 }
@@ -71,29 +143,39 @@ function compareTracks(track1, track2) {
 }
 
 
-export const getVideosIds = async (channelId, videosCount) => {
-    let ids = await fetch("https://www.googleapis.com/youtube/v3/search?key=" + process.env.YOUTUBE_API_KEY + "&channelId=" + channelId + "&part=id&order=date&maxResults=" + videosCount)
-    console.log(ids.statusText, ids.status)
-    if (!ids.ok)
-        return { error: { code: ids.status, message: "Failled to get videos ids: " + ids.statusText } }
-    ids = await ids.json()
-    return ids.items.map(v => v.id.videoId)
+const getVideosIds = async (channelId, videosCount) => {
+    const params = new URLSearchParams({
+        key: process.env.YOUTUBE_API_KEY || "",
+        channelId,
+        part: "id",
+        order: "date",
+        maxResults: String(videosCount),
+        type: "video",
+    })
+    const response = await fetch("https://www.googleapis.com/youtube/v3/search?" + params)
+    if (!response.ok) {
+        return {
+            error: {
+                code: response.status,
+                message: "Failed to get video IDs: " + response.statusText,
+            },
+        }
+    }
+
+    const data = await response.json()
+    return (data.items || []).map((video) => video.id?.videoId).filter(Boolean)
 }
 
-export const getRawTranscripts = async (channelId, videosCount) => {
+const getRawTranscripts = async (channelId, videosCount) => {
     try {
-        let videoIds = await getVideosIds(channelId, videosCount)
-        if (!videoIds.length)
+        const videoIds = await getVideosIds(channelId, videosCount)
+        if (!Array.isArray(videoIds) || !videoIds.length)
             return videoIds
-        console.log("videoIds", videoIds)
-        let result = await reteriveTranscript(videoIds)
-        if (!result.length)
-            return result
 
-        return result
+        return await retrieveTranscripts(videoIds)
     } catch (e) {
-        console.log(e)
-        return { message: "Failled: " + e }
+        console.error("TRANSCRIPT_RETRIEVAL_FAILED", { message: e?.message })
+        return { message: "Failed to retrieve channel transcripts." }
     }
 }
 
@@ -124,80 +206,122 @@ export const getChannelIdFromUsername = async username => {
     }
 }
 
-export async function getGeneratedTranscript({ theme, description, minutesNumber, sources, rawTranscripts }) {
+export async function getGeneratedTranscript(input) {
     try {
-        const videoDetails = rawTranscripts.map(video => {
-            const { title, keywords, description: videoDescription } = video.data;
-            const transcriptText = video.transcript.join(' '); // Unisce tutte le frasi in un singolo blocco di testo
+        await requireAuthenticatedUser();
+        const {
+            channelId,
+            theme,
+            description,
+            minutesNumber,
+            videosCount,
+            sources,
+        } = generationSchema.parse(input);
 
-            return `### Video: ${title}\nKeywords: ${keywords.join(', ')}\nDescription: ${videoDescription}\nTranscript: ${transcriptText}`;
-        }).join('\n\n');
+        for (const source of sources) {
+            if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_BYTES) {
+                return {
+                    ok: false,
+                    error: {
+                        code: "SOURCE_TOO_LARGE",
+                        message: "Each source must be no larger than 1 MB.",
+                    },
+                };
+            }
+        }
 
-        return await fetch("/api/ai", {
-            method: "POST",
-            body: {
-                cache: {
-                    contents: [
-                        {
-                            text: `### Video Analysis:\n${videoDetails}\n\n`,
-                            description: ""
-                        },
-                        {
-                            text: `### Sources:\n${sources.map((s, i) => "Source " + (i + 1) + ": \n" + s).join('\n\n---------\n\n')}\n\n=======\n`,
-                            description: ""
-                        },
-                    ]
+        const rawTranscripts = await getRawTranscripts(channelId, videosCount);
+        if (!Array.isArray(rawTranscripts) || rawTranscripts.length === 0) {
+            return {
+                ok: false,
+                error: {
+                    code: "TRANSCRIPTS_UNAVAILABLE",
+                    message: rawTranscripts?.error?.message ||
+                        rawTranscripts?.message ||
+                        "No usable captions were found for this channel.",
                 },
-                systemPrompt: `You are an expert YouTube scriptwriter. Your task is to create an original script based on the following specifications:
+            };
+        }
+
+        const videoDetails = rawTranscripts.map(video => {
+            const {
+                title = "Untitled video",
+                keywords = [],
+                description: videoDescription = "",
+            } = video.data || {};
+            const transcriptText = Array.isArray(video.transcript)
+                ? video.transcript.join(" ")
+                : "";
+
+            return `### Video: ${title}\nKeywords: ${keywords.join(", ")}\nDescription: ${videoDescription}\nTranscript: ${transcriptText}`;
+        }).join("\n\n");
+
+        const sourceDetails = sources
+            .map((source, index) => `### Source ${index + 1}\n${source}`)
+            .join("\n\n---\n\n");
+        const prompt = limitReferenceContext(
+            `## Channel reference videos\n${videoDetails}\n\n## User sources\n${sourceDetails}`,
+        );
+        const systemPrompt = `You are an expert YouTube scriptwriter. Create an original, production-ready script.
 
 CONTENT:
 - Main topic: ${theme}
 - Description: ${description}
-- Reference sources: [provided]
-- Target duration: ${minutesNumber}
+- Target duration: ${minutesNumber} minutes
 
 STYLE AND TONE:
-- Analyze these elements in the provided reference transcripts:
-  • Recurring narrative structure
-  • Characteristic linguistic patterns
-  • Narrative rhythm and dynamics
-  • Typical transition elements
-  • Characteristic opening/closing formulas
+- Infer only high-level traits such as pacing, narrative structure, tone, and transitions.
+- Do not copy distinctive phrases, passages, or signature expressions from the references.
+- Keep the result original and grounded in the user's sources.
 
 TECHNICAL REQUIREMENTS:
-- Indicate main editing points
-- Suggest moments for graphics/b-roll
-- Specify timing for each section
-- Highlight keywords for SEO
+- Write the complete script in the "script" field.
+- Include timestamps, editing notes, and B-roll or graphics cues inside the script.
+- Return a concise YouTube description and relevant SEO keywords.
+- Aim for a realistic spoken duration rather than padding the text.
 
-DELIVERABLE:
-The script must include:
+STRUCTURE:
 1. Initial hook
-2. Segmented main body
-3. Call-to-action
-4. YouTube-optimized description
-5. Suggested timestamps
+2. Clearly segmented main body
+3. Call to action
+4. Natural closing
 
-Please maintain the distinctive elements of the reference style while creating original and unique content.`
-            }
-        })
+Return the structured JSON requested by the response schema.`;
+
+        const generated = await generateStructuredScript({ prompt, systemPrompt });
+        return { ok: true, data: generated };
     } catch (err) {
-        return { error: err }
+        return actionError(
+            err,
+            "GENERATION_FAILED",
+            "The script could not be generated. Check the AI configuration and try again.",
+        );
     }
 }
 
-export const editTranscript = async (cacheName, prompt) => {
+export const editTranscript = async (input) => {
     try {
-        return await fetch("/api/ai", {
-            method: "POST",
-            body: {
-                promptInput: prompt,
-                cache: {
-                    name: cacheName
-                },
-            }
-        })
+        await requireAuthenticatedUser();
+        const { prompt, script } = z.object({
+            prompt: z.string().min(2).max(250),
+            script: scriptSchema,
+        }).parse(input);
+
+        const generated = await generateStructuredScript({
+            systemPrompt: `You are an expert YouTube script editor. Apply the user's requested revision and return a complete replacement script. Preserve useful content that the request does not ask you to change. Return the structured JSON requested by the response schema.`,
+            prompt: `## Current script
+${JSON.stringify(script)}
+
+## Requested revision
+${prompt}`,
+        });
+
+        return { ok: true, data: generated };
     } catch (err) {
-        return { error: err }
+        return actionError(
+            err,
+            "REVISION_FAILED",
+            "The script could not be revised. Check the AI configuration and try again.",
+        );
     }
 }

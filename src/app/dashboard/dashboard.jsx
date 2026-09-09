@@ -1,6 +1,6 @@
 import { db } from "@/components/firebase";
 import { Container } from "@/components/sections/Container";
-import { getDoc, doc, setDoc, collection, addDoc, getDocs } from "firebase/firestore";
+import { getDoc, doc, collection, getDocs } from "firebase/firestore";
 
 import { Navbar } from "@/components/sections/Navbar";
 import { Separator } from "@/components/ui/separator";
@@ -27,13 +27,10 @@ export async function Dashboard({ id }) {
         return item
     })
     const user = await getDoc(doc(db, "users", id));
-    if (!user.data()) return <Navbar logged={-1} />
+    if (!user.data())
+        return <Navbar logged={-1} />
     const { username, credits } = user.data()
 
-    const onsubmit = () => {
-        const docRef = collection(db, id)
-        addDoc(docRef, { title: "Titolodasa", script: "testo", desc: "descrizione del video" })
-    }
     return <>
         <Navbar logged={-1} />
         <Container>

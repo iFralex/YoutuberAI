@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@google-cloud/vertexai": "^1.9.2",
+    "@google/genai": "^2.21.0",
     "@headlessui/react": "^2.1.2",
     "@heroicons/react": "^2.1.4",
     "@hookform/resolvers": "^3.7.0",
@@ -31,6 +31,7 @@
     "react-dom": "^18",
     "react-dropzone": "^14.2.3",
     "react-hook-form": "^7.52.1",
+    "sharp": "^0.33.4",
     "tailwind-merge": "^2.3.0",
     "tailwindcss-animate": "^1.0.7",
     "zod": "^3.23.8"

@@ -50,7 +50,7 @@ export default function Register() {
     function onSubmit(values) {
         startTransition(async () => {
             try {
-                let user = await createUserWithEmailAndPassword(auth, values.email, values.password);
+                await createUserWithEmailAndPassword(auth, values.email, values.password);
                 let userId = await LoginAccount(values.email, values.password);
                 console.log("id", userId)
 
