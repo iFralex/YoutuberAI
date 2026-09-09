@@ -120,18 +120,6 @@ The result view keeps the long-form script beside its YouTube description, keywo
 
 ![Synthetic generated script with description, keywords, export actions and fact-check reminder](docs/images/script-result.png)
 
-### Social preview
-
-The square composition below condenses the main workflow into a single shareable image: creator workspace, generation brief, and generated script.
-
-![Youtuber AI workflow composition for social sharing](docs/images/youtuber-ai-linkedin-square-scripted.png)
-
-Regenerate it from the three product screenshots and the current SVG logo with ImageMagick:
-
-```bash
-tools/compose-linkedin-image.sh
-```
-
 ## Architecture
 
 ```text
